@@ -1,0 +1,141 @@
+---
+title: "Classification on Weight Lifting Exercise Dataset"
+author: "eliztang"
+date: "Friday, August 22, 2014"
+output: html_document
+---
+
+#### Get the data:
+```{r}
+if (! file.exists("pml-training.csv")) 
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile = "pml-training.csv")
+data.train = read.csv("pml-training.csv", stringsAsFactors = FALSE)
+
+if (! file.exists("pml-training.csv")) 
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile = "pml-testing.csv")
+data.test = read.csv("pml-testing.csv", stringsAsFactors = FALSE)
+```
+Where data.train will be used for training and testing the model before applying on the data.test  
+
+#### Partition data.train for Cross Validation:
+75% for training and 25% for testing.
+```{r}
+library(caret)
+STATIC_SEED = 8484
+set.seed(STATIC_SEED)
+
+inTrain = createDataPartition(data.train$classe, p = 3/4)[[1]]
+training = data.train[ inTrain,]
+testing = data.train[-inTrain,]
+str(training, list.len=50)
+```
+
+Original Number of Columns is `r ncol(training)`. 
+Original Number of Rows is `r nrow(training)`. 
+Reduce number of rows and columns for training.
+
+Data contains statistics that have contain many NAs
+like columns that start with "kurtosis_","skewness_","max_", 
+                       "min_", "amplitude_", "avg_","var_","stddev_"  
+for example "max_roll_belt" has 
+`r sum(is.na(training$max_roll_belt)) / nrow(training) *100` percentage of NA's.
+
+#### Therefore remove statistics columns:
+```{r}
+col.input = colnames(training)
+statistics_columns = c("kurtosis_","skewness_","max_", 
+                       "min_", "amplitude_", "avg_","var_","stddev_")
+columnsToRemove = list()
+for (col in statistics_columns) {
+  columnsToRemove = c(columnsToRemove, 
+                      grep(col, col.input)
+  )
+}
+columnsToRemove = unlist(columnsToRemove)
+training = training[, -columnsToRemove]
+```
+
+Number of Columns after removing statistics is `r ncol(training)`.
+
+Exploring some rows:
+```{r}
+head(training[,2:7])
+```
+
+"raw_timestamp_part_1" is the time stamp up to seconds,
+"raw_timestamp_part_2" is the milliseconds.
+Realise that for the same "num_window", they belong to the same second.
+```{r}
+training[training$user_name == "carlitos" & 
+                training$num_window == 12,3:7]
+```
+Will aggregate the rows of the same num_window.
+
+#### Aggregating the rows by 
+```{r}
+data.means <- aggregate(training[,-c(1:7,60)], 
+                         by = list(training$user_name, 
+                                   training$num_window, 
+                                   training$classe),
+                         FUN=mean)
+colnames(data.means) = c("user_name", "num_window", "classe",
+                         colnames(data.means)[-c(1:3)])
+```
+
+Plot of "roll_belt" of Pedro,   
+Before Aggregating:
+```{r, echo=FALSE}
+par(mfrow = c(2,1))
+training.pedro = training[training$user_name == "pedro" , ]
+ggplot(training.pedro, aes(x=num_window, y = roll_belt)) + geom_point()
+```
+
+After Aggregating:
+```{r, echo=FALSE}
+data.means.pedro = data.means[data.means$user_name == "pedro" , ]
+ggplot(data.means.pedro, aes(x=num_window, y = roll_belt)) + geom_point()
+```
+  
+The shape of the graphs before and after are similar therefore will use the aggregated data.
+Number of Rows after aggregating is `r nrow(data.means)`.
+
+#### Training a Random Forest Model:
+1. Note that "user_name" and "num_window" will not be used as a predictor.
+the time or the person who did the exercise should not matter during training so that it will apply to other people during other times.
+2. the target variable, "classe" is a factor.
+```{r}
+colnames(data.means)[1:2]
+training2 = data.means[,-c(1:2)]
+training2$classe = factor(training2$classe)
+
+set.seed(STATIC_SEED)
+modelFit <- train(classe ~ ., data = training2, 
+                  method="rf", prox=TRUE)
+modelFit
+```
+
+The Importance of Variables as deemed by the model:
+```{r}
+varImp(modelFit)
+```
+
+#### Testing the model:
+( the rows are not aggregated for the testing data, will test all. 
+The statistics columns are not removed also, as the random forest will only look for relevant columns for the predict. )
+```{r}
+actual = factor(testing$classe)
+testing.use = testing[,-c(1:7, 160)]
+predicted = predict(modelFit, testing.use)
+confusionMatrix(actual, predicted)
+```
+Out of Sample Accuracy of above 85% looks good.
+
+#### Using the model on the 20 test cases 
+where the target variable, "classe" is not known.
+```{r}
+predicted.real = predict(modelFit, data.test)
+predicted.real
+predicted.real.prob = predict(modelFit, data.test, type="prob")
+predicted.real.prob[c(3,11),] #the ones that got wrong
+```
+Probability of the classes were not high for the ones that were wrongly predicted.
